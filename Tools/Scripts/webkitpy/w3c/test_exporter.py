@@ -231,6 +231,18 @@ class WebPlatformTestExporter(object):
         self._run_wpt_git(['checkout', self._wpt_repo.default_branch])
         self._run_wpt_git(['reset', '--hard', 'origin/master'])
 
+    def wpt_already_has_bug_export(self):
+        if not self._bug_id:
+            return False
+
+        grep_patterns = [str(self._bug_id), f'bugs.webkit.org/show_bug.cgi?id={self._bug_id}']
+        for pattern in grep_patterns:
+            result = self._run_wpt_git(['log', '--oneline', '-n', '1', f'--grep={pattern}'], capture_output=True)
+            if result.returncode == 0 and result.stdout and result.stdout.strip():
+                _log.error(f'Bug {self._bug_id} appears already exported to WPT: {result.stdout.decode("utf-8", "replace").strip()}')
+                return True
+        return False
+
     def create_branch_with_patch(self, patch):
         _log.info('Applying patch to web-platform-tests branch ' + self._branch_name)
         try:
@@ -352,6 +364,10 @@ class WebPlatformTestExporter(object):
         _log.info('Fetching web-platform-tests repository')
         self._run_wpt_git(['fetch', 'origin', '--prune'])
         self.clean()
+
+        if self.wpt_already_has_bug_export():
+            _log.info(f'Bug {self._bug_id} has already been exported to WPT. Nothing to do.')
+            return 0
 
         if not self.set_up_wpt_fork():
             self.delete_local_branch(is_success=False)
