@@ -233,26 +233,41 @@ class WebPlatformTestExporter(object):
 
     def create_branch_with_patch(self, patch):
         _log.info('Applying patch to web-platform-tests branch ' + self._branch_name)
-        try:
-            self._run_wpt_git(['checkout', '-b', self._branch_name])
-        except Exception as e:
-            _log.warning(e)
-            _log.info('Retrying to create the branch')
-            if self._run_wpt_git(['show-ref', '--quiet', '--verify', f'refs/heads/{self._branch_name}']):
+        # Use -B to create or reset the branch from current HEAD. Idempotent: re-running does not
+        # fail with "branch already exists". If -B fails (e.g. branch never existed), create with -b.
+        result = self._run_wpt_git(['checkout', '-B', self._branch_name])
+        if result.returncode:
+            if not self._run_wpt_git(['show-ref', '--quiet', '--verify', f'refs/heads/{self._branch_name}']).returncode:
                 self._run_wpt_git(['branch', '-D', self._branch_name])
             self._run_wpt_git(['checkout', '-b', self._branch_name])
 
         try:
-            output = self._run_wpt_git(['apply', '--index', patch, '-3'], stderr=subprocess.STDOUT)
+            output = self._run_wpt_git(['apply', '--index', '--binary', '-3', patch], capture_output=True)
             if output.returncode:
-                _log.error(f'Failed to apply patch!')
-                _log.error(f"{output.stdout.decode('utf-8', 'replace')}")
-                return False
+                # Fallback: --index can partially apply (text hunks into index) then fail on new
+                # files (e.g. binary PNGs) that don't exist in the index. The index is then dirty,
+                # so a retry without --index would see wrong context. Reset and clean before retry.
+                _log.info('Patch application with --index failed (likely contains new files), resetting and retrying without --index...')
+                self._run_wpt_git(['reset', '--hard', 'HEAD'])
+                self._run_wpt_git(['clean', '-fd'])
+                output = self._run_wpt_git(['apply', '--binary', '-3', patch], capture_output=True)
+                if output.returncode:
+                    _log.info('Retrying patch application without 3-way merge...')
+                    self._run_wpt_git(['reset', '--hard', 'HEAD'])
+                    self._run_wpt_git(['clean', '-fd'])
+                    output = self._run_wpt_git(['apply', '--binary', patch], capture_output=True)
+                    if output.returncode:
+                        _log.error('Failed to apply patch!')
+                        if output.stdout:
+                            _log.error(output.stdout.decode('utf-8', 'replace'))
+                        if getattr(output, 'stderr', None):
+                            _log.error(output.stderr.decode('utf-8', 'replace'))
+                        return False
         except Exception as e:
             _log.warning(e)
             return False
 
-        # Check if there are no changes to commit
+        # Add all changes to index (including new files created by the patch)
         if self._run_wpt_git(['add', '--all']).returncode:
             _log.error('Failed to add changes')
             return False
@@ -362,7 +377,7 @@ class WebPlatformTestExporter(object):
             self.delete_local_branch(is_success=False)
             return 1
 
-        if git_patch_file and self.clean:
+        if git_patch_file and self._options.clean:
             self._filesystem.remove(git_patch_file)
 
         if self._options.use_linter:
